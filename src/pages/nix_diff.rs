@@ -1,10 +1,10 @@
-use crate::utils::ansi_to_rich::ansi_to_rich;
+use crate::utils::ansi_to_rich::{ansi_to_spans, make_spans};
 use anyhow::{Context, bail};
 use async_stream::stream;
 use duct::cmd;
 use futures::Stream;
 use iced::keyboard::key::Code::Comma;
-use iced::widget::text::Rich;
+use iced::widget::text::{Rich, Span};
 use iced::widget::{
     TextInput, button, column, container, pick_list, progress_bar, rich_text, row, scrollable,
     text, text_input,
@@ -15,6 +15,7 @@ use log::{debug, error};
 use serde_json::json;
 use ssh2_config::{ParseRule, SshConfig};
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::env;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -23,42 +24,72 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::task::Poll;
+use crate::pages::nix_diff::cache::DiffCache;
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    NodeNameChange(String),
     StartDiff,
-    PickClusterDir,
-    ClusterPathChanged(String),
-    StartUpdateClusterInfo,
-    UpdateClusterInfo(Option<Vec<String>>),
     IpAttrChanged(String),
     DiffResult(Option<String>),
     Error(String),
     DiffProgress(f32),
 }
 
-pub struct NixDiffHostPage {
-    cluster_path: PathBuf,
-    all_cluster_nodes: Vec<String>,
+mod cache {
+    use std::mem;
+    use iced::advanced::text::Span;
+    use iced::widget::rich_text;
+    use iced::widget::text::Rich;
+    use crate::pages::nix_diff::Message;
+    use crate::utils::ansi_to_rich::{ansi_to_spans, make_spans};
+
+    // Uh-uh.. No touching.
+    // This is locked away because it's self-referential.
+    pub struct DiffCache {
+        raw: String,
+        spans: Vec<Span<'static, Message>>,
+    }
+
+    impl DiffCache {
+        pub fn new(diff: String) -> Self {
+            unsafe {
+                let static_diff: &'static str = mem::transmute(diff.as_str());
+                let raw_spans = ansi_to_spans(&static_diff);
+                let spans = make_spans(&raw_spans);
+
+                Self { raw: diff, spans }
+            }
+        }
+
+        pub fn spans(&self) -> &[Span<'static, Message>] {
+            &self.spans
+        }
+    }
+}
+
+pub struct NixNodeDiffView {
+    node_path: PathBuf,
     ip_attr: String,
-    node_name: Option<String>,
-    diff: Option<String>,
-    loading_cluster: bool,
+    node_name: String,
+    diff: Option<DiffCache>,
     loading_diff: bool,
     error: Option<String>,
     diff_progress: f32,
 }
 
-impl Default for NixDiffHostPage {
-    fn default() -> Self {
+impl NixNodeDiffView {
+    pub fn is_diffing(&self) -> bool {
+        self.loading_diff
+    }
+}
+
+impl NixNodeDiffView {
+    pub fn new(cluster_path: PathBuf, ip_attr: String, node_name: String) -> Self {
         Self {
-            cluster_path: PathBuf::new(),
-            all_cluster_nodes: Vec::new(),
-            ip_attr: "config.base.primaryIP.address".to_owned(),
-            node_name: None,
+            node_path: cluster_path,
+            ip_attr,
+            node_name,
             diff: None,
-            loading_cluster: false,
             loading_diff: false,
             error: None,
             diff_progress: 0.0,
@@ -66,29 +97,13 @@ impl Default for NixDiffHostPage {
     }
 }
 
-impl NixDiffHostPage {
+impl NixNodeDiffView {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::NodeNameChange(name) => {
-                self.node_name = Some(name);
-            }
             Message::StartDiff => {
-                return self.run_diff_task();
-            }
-            Message::PickClusterDir => {
-                if let Some(cluster_dir) = rfd::FileDialog::new()
-                    .set_directory(&self.cluster_path)
-                    .pick_file()
-                {
-                    self.cluster_path = cluster_dir;
-                    return self.start_cluster_info_update();
-                };
-            }
-            Message::ClusterPathChanged(path) => {
-                self.cluster_path = PathBuf::from(path);
-            }
-            Message::StartUpdateClusterInfo => {
-                return self.start_cluster_info_update();
+                if !self.loading_diff {
+                    return self.run_diff_task();
+                }
             }
             Message::IpAttrChanged(mut ip_attr) => {
                 if ip_attr.is_empty() {
@@ -96,16 +111,9 @@ impl NixDiffHostPage {
                 }
                 self.ip_attr = ip_attr;
             }
-            Message::UpdateClusterInfo(nodes) => {
-                self.loading_cluster = false;
-                if let Some(nodes) = nodes {
-                    self.all_cluster_nodes = nodes;
-                    self.node_name = self.all_cluster_nodes.first().cloned();
-                }
-            }
             Message::DiffResult(diff) => {
                 self.loading_diff = false;
-                self.diff = diff;
+                self.diff = diff.map(DiffCache::new);
             }
             Message::DiffProgress(progress) => {
                 self.diff_progress = progress;
@@ -119,21 +127,6 @@ impl NixDiffHostPage {
     }
 
     pub fn view(&self) -> Element<Message> {
-        let cluster_dir_header = text("Nix Hive Location:");
-
-        let base_dir = self.cluster_path.as_os_str().to_string_lossy();
-        let mut cluster_dir_input = text_input("Cluster Directory", base_dir.as_ref());
-        let mut cluster_dir_pick_btn = button("Browse");
-        if !self.loading_cluster && !self.loading_diff {
-            cluster_dir_input = cluster_dir_input
-                .on_input(Message::ClusterPathChanged)
-                .on_submit(Message::StartUpdateClusterInfo);
-            cluster_dir_pick_btn = cluster_dir_pick_btn.on_press(Message::PickClusterDir);
-        }
-        let cluster_dir_picker = row![cluster_dir_input, cluster_dir_pick_btn];
-
-        let cluster_dir_group = container(column![cluster_dir_header, cluster_dir_picker]);
-
         let ip_attr_header = text("Node IP Address Attribute Location:");
         let ip_attr_input =
             text_input("Attribute Path", &self.ip_attr).on_input(Message::IpAttrChanged);
@@ -141,83 +134,50 @@ impl NixDiffHostPage {
         let ip_attr_group = container(column![ip_attr_header, ip_attr_input])
             .padding(Padding::ZERO.bottom(5).top(5));
 
-        let node_name_header = text("Selected Node:");
-        let node_name_picker = pick_list(
-            &self.all_cluster_nodes[..],
-            self.node_name.as_ref(),
-            Message::NodeNameChange,
-        )
-        .placeholder("Node Name");
-
-        let node_name_group = container(column![node_name_header, node_name_picker])
-            .padding(Padding::ZERO.top(5).bottom(20));
-
         let mut run_diff_btn = button("Run Diff");
-        if self.node_name.is_some() && !self.loading_diff {
+        if !self.loading_diff {
             run_diff_btn = run_diff_btn.on_press(Message::StartDiff);
         }
 
-        let progress_bar = progress_bar(0.0..=11.0, self.diff_progress).height(Length::Fixed(5.));
+        let progress_bar = progress_bar(0.0..=10.0, self.diff_progress).height(Length::Fixed(5.));
 
         let error_txt = text(self.error.as_deref().unwrap_or(""))
             .color(Color::new(1.0, 0.2, 0.2, 1.0))
             .width(Length::Fill)
             .center();
 
-        let top = container(
-            column![
-                cluster_dir_group,
-                node_name_group,
-                ip_attr_group,
-                run_diff_btn,
-                error_txt,
-                progress_bar,
-            ]
-            .padding(50),
-        )
-        .style(|theme| {
-            let mut style = container::rounded_box(theme);
-            style.background = None;
-            style
-        });
+        let top =
+            container(column![ip_attr_group, run_diff_btn, error_txt, progress_bar,].padding(50))
+                .style(|theme| {
+                    let mut style = container::rounded_box(theme);
+                    style.background = None;
+                    style
+                });
 
-        let mut main = column![top];
-
-        if let Some(diff) = &self.diff {
-            let rich_diff = rich_text(ansi_to_rich(diff)).font(Font::MONOSPACE);
-            let diff_log = container(scrollable(rich_diff))
-                .padding(50)
+        let diff_log = if let Some(diff) = &self.diff {
+            let rich_diff = rich_text(diff.spans()).font(Font::MONOSPACE);
+            container(scrollable(rich_diff))
+                .padding(5)
                 .style(container::dark)
                 .width(Length::Fill)
-                .height(Length::Fill);
-            main = main.push(diff_log);
-        }
+                .height(Length::Fill)
+        } else {
+            container(column![])
+                .padding(5)
+                .style(container::dark)
+                .width(Length::Fill)
+                .height(Length::Fill)
+        };
 
+        let main = column![top, diff_log];
         container(main).into()
-    }
-
-    pub fn start_cluster_info_update(&mut self) -> Task<Message> {
-        self.loading_cluster = true;
-        self.all_cluster_nodes.clear();
-        self.node_name = None;
-
-        let cluster_path = self.cluster_path.clone();
-
-        Task::future(fetch_cluster_nodes(cluster_path)).then(|res| match res {
-            Ok(nodes) => Task::done(Message::UpdateClusterInfo(Some(nodes))),
-            Err(err) => {
-                error!("Couldn't update cluster nodes {err:?}");
-                let err = err.to_string();
-                Task::done(Message::UpdateClusterInfo(None)).chain(Task::done(Message::Error(err)))
-            }
-        })
     }
 
     pub fn run_diff_task(&mut self) -> Task<Message> {
         self.loading_diff = true;
 
-        let cluster_path = self.cluster_path.clone();
-        let node_name = self.node_name.clone().unwrap_or_default();
+        let cluster_path = self.node_path.clone();
+        let node_name = self.node_name.clone();
         let ip_attr = self.ip_attr.clone();
 
         Task::stream(run_diff(cluster_path, node_name, ip_attr)).then(|res| match res {
@@ -343,7 +303,6 @@ pub fn run_diff(
             .read()
             .context("Couldn't diff the two derivations")?;
 
-        yield Ok(Message::DiffProgress(11.0));
         yield Ok(Message::DiffResult(Some(diff_out)));
     }
 }

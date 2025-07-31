@@ -25,33 +25,35 @@ pub fn ansi_color_from_code(code: u8) -> Color {
     }
 }
 
-pub fn ansi_to_rich<Link, Font>(ansi_text: &str) -> Vec<Span<'_, Link, Font>> {
+pub fn ansi_to_spans(ansi_text: &str) -> Vec<(&str, Option<Color>)> {
     let mut spans = Vec::new();
     let mut color = None;
     for ansi in ansi_text.ansi_parse() {
         match ansi {
-            Output::TextBlock(text) => {
-                let span = span(text).color_maybe(color);
-                spans.push(span)
-            }
-            Output::Escape(esc) => {
-                match esc {
-                    AnsiSequence::SetGraphicsMode(mode) => {
-                        for param in mode {
-                            match param {
-                                0 => color = None,
-                                30..=37 => color = Some(ansi_color_from_code(param)),
-                                90..=97 => color = Some(ansi_color_from_code(param)),
-                                39 => color = None,
-                                _ => {}
-                            }
+            Output::TextBlock(text) => spans.push((text, color)),
+            Output::Escape(esc) => match esc {
+                AnsiSequence::SetGraphicsMode(mode) => {
+                    for param in mode {
+                        match param {
+                            0 => color = None,
+                            30..=37 => color = Some(ansi_color_from_code(param)),
+                            90..=97 => color = Some(ansi_color_from_code(param)),
+                            39 => color = None,
+                            _ => {}
                         }
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
         }
     }
 
     spans
+}
+
+pub fn make_spans<'a, Link>(spans: &[(&'a str, Option<Color>)]) -> Vec<Span<'a, Link>> {
+    spans
+        .iter()
+        .map(|(text, color)| span(*text).color_maybe(*color))
+        .collect()
 }

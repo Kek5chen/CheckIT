@@ -1,7 +1,8 @@
 use iced::{Element, Task, Theme};
 use std::net::IpAddr;
 use iced_futures::Subscription;
-use crate::pages::nix_diff::NixDiffHostPage;
+use crate::pages::nix_cluster::NixClusterView;
+use crate::pages::nix_diff::NixNodeDiffView;
 use crate::pages::ping::PingPage;
 
 mod pages;
@@ -9,14 +10,14 @@ pub mod utils;
 
 #[derive(Debug)]
 pub enum MainMessage {
-    PingPage(pages::ping::Message),
-    NixDiffPage(pages::nix_diff::Message),
+    PingView(pages::ping::Message),
+    NixClusterView(pages::nix_cluster::Message),
 }
 
 #[derive(Default)]
 pub struct CheckITApp {
     ping_page: PingPage,
-    nix_diff_page: NixDiffHostPage,
+    nix_cluster: NixClusterView,
 }
 
 pub struct PingProc {
@@ -26,17 +27,17 @@ pub struct PingProc {
 impl CheckITApp {
     fn update(&mut self, msg: MainMessage) -> Task<MainMessage> {
         match msg {
-            MainMessage::PingPage(msg) => {
+            MainMessage::PingView(msg) => {
                 self.ping_page.update(msg);
                 Task::none()
             },
-            MainMessage::NixDiffPage(msg) => self.nix_diff_page.update(msg).map(MainMessage::NixDiffPage),
+            MainMessage::NixClusterView(msg) => self.nix_cluster.update(msg).map(MainMessage::NixClusterView),
         }
     }
     
     fn view(&self) -> Element<MainMessage> {
         // self.ping_page.view().map(|m| MainMessage::PingPage(m))
-        self.nix_diff_page.view().map(|m| MainMessage::NixDiffPage(m))
+        self.nix_cluster.view().map(|m| MainMessage::NixClusterView(m))
     }
     
     fn subscription(&self) -> Subscription<MainMessage> {
