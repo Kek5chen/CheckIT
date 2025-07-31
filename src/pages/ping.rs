@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::hash::Hash;
 use std::io::{BufRead, BufReader};
 use std::net::IpAddr;

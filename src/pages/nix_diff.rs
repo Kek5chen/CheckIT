@@ -1,29 +1,16 @@
-use crate::utils::ansi_to_rich::{ansi_to_spans, make_spans};
 use anyhow::{Context, bail};
 use async_stream::stream;
 use duct::cmd;
 use futures::Stream;
-use iced::keyboard::key::Code::Comma;
-use iced::widget::text::{Rich, Span};
 use iced::widget::{
-    TextInput, button, column, container, pick_list, progress_bar, rich_text, row, scrollable,
+    button, column, container, progress_bar, rich_text, scrollable,
     text, text_input,
 };
-use iced::{Border, Color, Element, Font, Length, Padding, Task};
-use iced_futures::core::Background;
+use iced::{Color, Element, Font, Length, Padding, Task};
 use log::{debug, error};
-use serde_json::json;
 use ssh2_config::{ParseRule, SshConfig};
-use std::borrow::Cow;
-use std::cell::OnceCell;
-use std::env;
-use std::ffi::OsStr;
-use std::fs::File;
 use std::net::{IpAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::process::{Command, Stdio};
-use std::task::Poll;
 use crate::pages::nix_diff::cache::DiffCache;
 
 #[derive(Debug, Clone)]
@@ -38,15 +25,13 @@ pub enum Message {
 mod cache {
     use std::mem;
     use iced::advanced::text::Span;
-    use iced::widget::rich_text;
-    use iced::widget::text::Rich;
     use crate::pages::nix_diff::Message;
     use crate::utils::ansi_to_rich::{ansi_to_spans, make_spans};
 
     // Uh-uh.. No touching.
     // This is locked away because it's self-referential.
     pub struct DiffCache {
-        raw: String,
+        _raw: String,
         spans: Vec<Span<'static, Message>>,
     }
 
@@ -57,7 +42,7 @@ mod cache {
                 let raw_spans = ansi_to_spans(&static_diff);
                 let spans = make_spans(&raw_spans);
 
-                Self { raw: diff, spans }
+                Self { _raw: diff, spans }
             }
         }
 
@@ -113,6 +98,7 @@ impl NixNodeDiffView {
             }
             Message::DiffResult(diff) => {
                 self.loading_diff = false;
+                self.error = None;
                 self.diff = diff.map(DiffCache::new);
             }
             Message::DiffProgress(progress) => {
@@ -194,16 +180,13 @@ impl NixNodeDiffView {
 }
 
 fn ip_from_node(cluster_path: &PathBuf, node_name: &str, ip_attr: &str) -> anyhow::Result<IpAddr> {
-    let ip_json = if cluster_path.ends_with("flake.nix") {
-        let args = [
-            "eval",
-            &format!(".#nixosConfigurations.{node_name}.{ip_attr}"),
-            "--json",
-        ];
-        run_nix_command_in_dir(&cluster_path, &args)
-    } else {
-        todo!("only flakes are supported right now")
-    }?;
+    let args = [
+        "eval",
+        &format!(".#nixosConfigurations.{node_name}.{ip_attr}"),
+        "--json",
+    ];
+
+    let ip_json = run_nix_command_in_dir(&cluster_path, &args)?;
 
     let ip_str = serde_json::from_str::<String>(&ip_json)
         .with_context(|| format!("Couldn't parse JSON {ip_json:?}"))?;
@@ -221,12 +204,7 @@ pub async fn fetch_cluster_nodes(cluster_path: PathBuf) -> anyhow::Result<Vec<St
         return Ok(nodes);
     }
 
-    let hive = cluster_path.join("hive.nix");
-    if let Ok(nodes) = fetch_nodes_from_legacy(&hive) {
-        return Ok(nodes);
-    }
-
-    bail!("Couldn't get proper nodes from flake.nix or hive.nix");
+    bail!("Couldn't get proper nodes from flake.nix");
 }
 
 pub fn run_diff(
@@ -238,7 +216,7 @@ pub fn run_diff(
         yield Ok(Message::DiffProgress(0.0));
 
         let ip = ip_from_node(&cluster_path, &node_name, &ip_attr)
-            .with_context(|| "Couldn't find IP Address of Node {node_name}")?;
+            .with_context(|| format!("Couldn't find IP Address at {node_name}.{ip_attr}"))?;
         yield Ok(Message::DiffProgress(1.0));
 
         let cluster_path = cluster_path
@@ -307,29 +285,12 @@ pub fn run_diff(
     }
 }
 
-fn is_nix_file(path: &Path) -> bool {
-    path.extension() == Some(OsStr::new("nix"))
-}
-
 fn fetch_nodes_from_file(path: &Path) -> anyhow::Result<Vec<String>> {
     if path.ends_with("flake.nix") {
         fetch_nodes_from_flake(path)
-    } else if is_nix_file(path) {
-        fetch_nodes_from_legacy(path)
     } else {
-        bail!("Not a nix file. Cannot fetch nodes");
+        bail!("Not a flake.nix file. Cannot fetch nodes");
     }
-}
-
-fn fetch_nodes_from_legacy(hive: &Path) -> anyhow::Result<Vec<String>> {
-    const LEGACY_ARGS: &[&str] = &[
-        "eval",
-        "-E",
-        r#"builtins.attrNames (builtins.removeAttrs (import ./hive.nix { nixpkgs = <nixpkgs>; }) ["defaults" "meta"])"#,
-        "--json",
-        "--impure",
-    ];
-    nodes_from_nix_command(hive, &LEGACY_ARGS)
 }
 
 pub fn fetch_nodes_from_flake(flake: &Path) -> anyhow::Result<Vec<String>> {

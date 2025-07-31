@@ -2,7 +2,6 @@ use iced::{Element, Task, Theme};
 use std::net::IpAddr;
 use iced_futures::Subscription;
 use crate::pages::nix_cluster::NixClusterView;
-use crate::pages::nix_diff::NixNodeDiffView;
 use crate::pages::ping::PingPage;
 
 mod pages;

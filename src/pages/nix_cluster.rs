@@ -1,11 +1,9 @@
 use crate::pages::nix_diff::{NixNodeDiffView, fetch_cluster_nodes};
-use iced::widget::{button, column, container, pick_list, row, text, text_input};
-use iced::{Element, Length, Padding, Task};
+use iced::widget::{button, column, container, row, text, text_input};
+use iced::{Color, Element, Length, Padding, Task};
 use iced_aw::selection_list;
 use log::error;
-use std::env::current_exe;
 use std::path::PathBuf;
-use std::thread::current;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -63,6 +61,7 @@ impl NixClusterView {
                 return self.start_cluster_info_update();
             }
             Message::UpdateClusterInfo(nodes) => {
+                self.error = None;
                 self.loading_cluster = false;
                 if let Some(nodes) = nodes {
                     self.all_cluster_nodes = nodes;
@@ -151,10 +150,15 @@ impl NixClusterView {
         let node_name_picker = selection_list(&self.all_cluster_nodes[..], Message::NodeNameChange);
         let diff_all_row = row![node_diff_all].push_maybe(node_diff_count);
 
+        let error = text(self.error.as_deref().unwrap_or(""))
+            .color(Color::new(1.0, 0.2, 0.2, 1.0))
+            .width(Length::Fill)
+            .center();
+
         let node_name_group =
             container(column![node_name_header, diff_all_row, node_name_picker]).padding(5);
 
-        let mut settings_and_node = column![cluster_dir_group, ip_attr_group]
+        let mut settings_and_node = column![cluster_dir_group, ip_attr_group, error]
             .width(Length::FillPortion(3))
             .padding(5);
         if let Some(idx) = self.current_node {
@@ -184,7 +188,7 @@ impl NixClusterView {
         Task::future(fetch_cluster_nodes(cluster_path)).then(|res| match res {
             Ok(nodes) => Task::done(Message::UpdateClusterInfo(Some(nodes))),
             Err(err) => {
-                error!("Couldn't update cluster nodes {err:?}");
+                error!("Couldn't update cluster nodes: {err:?}");
                 let err = err.to_string();
                 Task::done(Message::UpdateClusterInfo(None)).chain(Task::done(Message::Error(err)))
             }
