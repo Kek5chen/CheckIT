@@ -1,10 +1,11 @@
-use iced::{Element, Theme};
+use iced::{Element, Task, Theme};
 use std::net::IpAddr;
 use iced_futures::Subscription;
 use crate::pages::nix_diff::NixDiffHostPage;
 use crate::pages::ping::PingPage;
 
 mod pages;
+pub mod utils;
 
 #[derive(Debug)]
 pub enum MainMessage {
@@ -23,10 +24,13 @@ pub struct PingProc {
 }
 
 impl CheckITApp {
-    fn update(&mut self, msg: MainMessage) {
+    fn update(&mut self, msg: MainMessage) -> Task<MainMessage> {
         match msg {
-            MainMessage::PingPage(msg) => self.ping_page.update(msg),
-            MainMessage::NixDiffPage(msg) => self.nix_diff_page.update(msg),
+            MainMessage::PingPage(msg) => {
+                self.ping_page.update(msg);
+                Task::none()
+            },
+            MainMessage::NixDiffPage(msg) => self.nix_diff_page.update(msg).map(MainMessage::NixDiffPage),
         }
     }
     
@@ -43,6 +47,8 @@ impl CheckITApp {
 }
 
 fn main() -> iced::Result {
+    env_logger::init();
+
     iced::application("CheckIT", CheckITApp::update, CheckITApp::view)
         .theme(|_| Theme::CatppuccinMocha)
         .subscription(CheckITApp::subscription)
